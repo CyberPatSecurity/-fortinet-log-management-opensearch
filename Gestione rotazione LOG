@@ -1,0 +1,124 @@
+# Gestione sicura del file `fortinet.log` per Logstash + OpenSearch
+
+Questo documento descrive come configurare in modo affidabile il ciclo di ingestione log da Fortinet verso Logstash/OpenSearch, evitando problemi post-rotazione o reboot.
+
+---
+
+## Obiettivo
+
+Garantire che il file `/var/log/fortinet.log`:
+
+* venga creato con permessi corretti (`640 root:logstash`)
+* sia sempre leggibile da Logstash
+* non causi interruzioni dell'ingestion dopo la mezzanotte o reboot
+
+---
+
+## 1. Configurazione di `rsyslog`
+
+File: `/etc/rsyslog.d/20-fortinet.conf`
+
+```rsyslog
+# Imposta proprietà e permessi del file di log
+$FileOwner root
+$FileGroup logstash
+$FileCreateMode 0640
+
+# Regole per ricevere i log Fortinet via UDP
+$template FORTILOGS,"/var/log/fortinet.log"
+:fromhost-ip, isequal, "10.160.99.250" ?FORTILOGS
+& stop
+```
+
+> ✅ Questo assicura che ogni nuovo `fortinet.log` sia creato correttamente
+
+---
+
+## 2. Configurazione di Logstash
+
+File: `/etc/logstash/conf.d/fortinet.conf`
+
+```conf
+input {
+  file {
+    path => "/var/log/fortinet.log"
+    start_position => "beginning"
+    sincedb_path => "/dev/null"
+    close_older => 60
+  }
+}
+
+filter {
+  # Eventuale parsing
+}
+
+output {
+  opensearch {
+    hosts => ["https://localhost:9200"]
+    user => "admin"
+    password => "admin"
+    ssl => true
+    ssl_certificate_verification => false
+    index => "fortinet-logs"
+  }
+}
+```
+
+> ✅ `sincedb_path => "/dev/null"` evita problemi di inode
+> ✅ `close_older => 60` forza Logstash a rileggere file ruotati
+
+---
+
+## 3. Configurazione di logrotate
+
+File: `/etc/logrotate.d/fortinet`
+
+```conf
+/var/log/fortinet.log {
+    daily
+    missingok
+    rotate 14
+    compress
+    delaycompress
+    notifempty
+    create 640 root root
+    postrotate
+        /bin/systemctl restart rsyslog > /dev/null 2>/dev/null || true
+    endscript
+}
+```
+
+> ✅ Il comando `restart` (e non `reload`) garantisce che rsyslog applichi correttamente le direttive `$FileOwner` ecc.
+
+---
+
+## 4. Verifica manuale (opzionale)
+
+Puoi forzare una rotazione e testare i permessi con:
+
+```bash
+sudo logrotate -f /etc/logrotate.d/fortinet
+ls -l /var/log/fortinet.log
+```
+
+Deve risultare:
+
+```
+-rw-r----- 1 root logstash ... /var/log/fortinet.log
+```
+
+---
+
+## 5. Riepilogo
+
+| Componente | Stato richiesto                         |
+| ---------- | --------------------------------------- |
+| rsyslog    | crea con 0640 root\:logstash            |
+| logrotate  | esegue `restart` su rsyslog             |
+| logstash   | legge sempre da `/var/log/fortinet.log` |
+
+Con questa configurazione, l’ingestion dei log Fortinet è **stabile, continua e sicura**, anche dopo mezzanotte, reboot o rotazioni log.
+
+---
+
+💡 *Documento creato per supportare l'infrastruttura di logging Fortinet presso Imprebanca.*
